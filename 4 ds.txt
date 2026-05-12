@@ -1,0 +1,194 @@
+#Server
+# Python3 program imitating a clock server
+from dateutil import parser
+import threading
+import datetime
+import socket
+import time
+
+# datastructure used to store client address and clock data
+client_data = {}
+client_data_lock = threading.Lock()
+print_lock = threading.Lock()
+sync_lock = threading.Event()
+
+def safe_print(*args, **kwargs):
+    with print_lock:
+        print(*args, **kwargs)
+
+''' nested thread function used to receive
+    clock time from a connected client '''
+def startReceivingClockTime(connector, address):
+    while True:
+        clock_time_string = connector.recv(1024).decode()
+        clock_time = parser.parse(clock_time_string)
+        clock_time_diff = datetime.datetime.now() - clock_time
+
+        with client_data_lock:
+            client_data[address] = {
+                "clock_time"      : clock_time,
+                "time_difference" : clock_time_diff,
+                "connector"       : connector
+            }
+
+        safe_print("Client Data updated with: " + str(address), end="\n\n")
+        time.sleep(5)
+
+''' master thread function used to open portal for
+    accepting clients over given port '''
+def startConnecting(master_server):
+    while True:
+        master_slave_connector, addr = master_server.accept()
+        slave_address = str(addr[0]) + ":" + str(addr[1])
+
+        safe_print(slave_address + " got connected successfully")
+
+        current_thread = threading.Thread(
+                            target=startReceivingClockTime,
+                            args=(master_slave_connector, slave_address,))
+        current_thread.daemon = True
+        current_thread.start()
+
+# subroutine function used to fetch average clock difference
+def getAverageClockDiff():
+    with client_data_lock:
+        time_difference_list = list(client['time_difference']
+                                    for client_addr, client
+                                    in client_data.items())
+
+    sum_of_clock_difference = sum(time_difference_list,
+                                  datetime.timedelta(0, 0))
+    average_clock_difference = sum_of_clock_difference / len(time_difference_list)
+    return average_clock_difference
+
+''' master sync thread function used to generate
+    cycles of clock synchronization in the network '''
+def synchronizeAllClocks():
+    while True:
+        safe_print("New synchronization cycle started.")
+        safe_print("Number of clients to be synchronized: " + str(len(client_data)))
+
+        if len(client_data) > 0:
+            average_clock_difference = getAverageClockDiff()
+
+            with client_data_lock:
+                snapshot = dict(client_data)  # safe copy to iterate
+
+            for client_addr, client in snapshot.items():
+                try:
+                    synchronized_time = datetime.datetime.now() + average_clock_difference
+                    client['connector'].send(str(synchronized_time).encode())
+                except Exception as e:
+                    safe_print("Something went wrong while sending synchronized time through " + str(client_addr))
+        else:
+            safe_print("No client data. Synchronization not applicable.")
+
+        safe_print("\n")
+        sync_lock.wait(timeout=5)  # ← stable 5 second wait
+
+# function used to initiate the Clock Server / Master Node
+def initiateClockServer(port=8080):
+    master_server = socket.socket()
+    master_server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+
+    print("Socket at master node created successfully\n")
+
+    master_server.bind(('', port))
+    master_server.listen(10)
+    print("Clock server started...\n")
+
+    print("Starting to make connections...\n")
+    master_thread = threading.Thread(target=startConnecting, args=(master_server,))
+    master_thread.daemon = True
+    master_thread.start()
+
+    print("Starting synchronization parallelly...\n")
+    sync_thread = threading.Thread(target=synchronizeAllClocks, args=())
+    sync_thread.daemon = True
+    sync_thread.start()
+
+# Driver function
+if __name__ == '__main__':
+    initiateClockServer(port=8080)
+
+=================================================================================================================================
+
+#Client
+# Python3 program imitating a clock client
+from timeit import default_timer as timer
+from dateutil import parser
+import threading
+import datetime
+import socket
+import time
+
+# print lock to prevent interleaved output
+print_lock = threading.Lock()
+
+def safe_print(*args, **kwargs):
+    with print_lock:
+        print(*args, **kwargs)
+
+def startSendingTime(slave_client):
+    """Client thread function used to send time at client side."""
+    while True:
+        try:
+            slave_client.send(str(datetime.datetime.now()).encode())
+            safe_print("Recent time sent successfully", end="\n\n")
+            time.sleep(5)
+        except Exception as e:
+            safe_print("Error sending time: " + str(e))
+            break  # exit loop if connection is lost
+
+def startReceivingTime(slave_client):
+    """Client thread function used to receive synchronized time."""
+    while True:
+        try:
+            data = slave_client.recv(1024).decode()
+            if not data:
+                safe_print("Server closed the connection.")
+                break  # exit loop if server disconnects
+            synchronized_time = parser.parse(data)
+            safe_print("Synchronized time at the client is: " + str(synchronized_time), end="\n\n")
+        except Exception as e:
+            safe_print("Error receiving time: " + str(e))
+            break  # exit loop if connection is lost
+
+def initiateSlaveClient(port=8080):
+    """Function used to synchronize client process time."""
+    slave_client = socket.socket()
+
+    try:
+        slave_client.connect(('127.0.0.1', port))
+    except ConnectionRefusedError:
+        print("Connection failed. Is the server running?")
+        return
+
+    print("Connected to server successfully\n")
+
+    # Start sending time to server
+    print("Starting to send time to server\n")
+    send_time_thread = threading.Thread(
+        target=startSendingTime,
+        args=(slave_client,)
+    )
+    send_time_thread.daemon = True  # exits cleanly when kernel restarts
+    send_time_thread.start()
+
+    # Start receiving synchronized time from server
+    print("Starting to receive synchronized time from server\n")
+    receive_time_thread = threading.Thread(
+        target=startReceivingTime,
+        args=(slave_client,)
+    )
+    receive_time_thread.daemon = True  # exits cleanly when kernel restarts
+    receive_time_thread.start()
+
+# Driver function
+if __name__ == '__main__':
+    try:
+        initiateSlaveClient(port=8080)
+    except KeyboardInterrupt:
+        print("\nClient stopped.")
+
+==============================================================================================
